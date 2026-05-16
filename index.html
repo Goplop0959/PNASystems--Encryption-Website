@@ -1,0 +1,231 @@
+<!--
+PNASystems: OSK License
+Version 1.3
+Copyright © Roblox User "Goplop0959"
+Original Creator and License Author: Roblox UserName "Goplop0959"
+Discord: asherploploto
+GitHub: Goplop0959
+
+1. Grant of Permission
+Permission is granted to any individual or entity ("the User") to use, copy,
+modify, merge, publish, and distribute this software ("the Software"),
+including both the original version and any modified versions, subject to
+the conditions of this License. These permissions apply to all copies,
+derivatives, and redistributions of the Software in any form.
+
+2. Required Attribution
+The following attribution requirements apply to all redistributions:
+    - The original creator must always be credited as:
+          "Original Creator: Roblox User Goplop0959"
+    - All credits must appear at the top of the script, before any executable code.
+    - If the Software is modified, the modifier must be credited as:
+          "Modified By: [Modifier's Name]"
+    - If a modified version is further modified and redistributed, all contributors
+      in the chain must be credited, including:
+          1. The original creator (Goplop0959)
+          2. All previous modifiers
+          3. The most recent modifier
+    - The Credits section is the ONLY part of this License that may be edited,
+      and ONLY for the purpose of adding your own name when you modify the
+      Software. You may NOT remove, alter, or reorder any existing names.
+
+3. Modification and Redistribution
+Users may modify the Software and distribute modified versions only if:
+    - All required credits are preserved exactly as described.
+    - This License text remains included and unmodified.
+    - The modified version clearly indicates that it has been modified.
+    - Modification of the License itself is strictly prohibited except by the
+      original creator, Roblox User "Goplop0959".
+Redistribution is permitted only when these conditions are met.
+
+4. Prohibition on Obfuscation
+To preserve transparency and maintain the integrity of the attribution chain:
+    - The Software may not be obfuscated in any way that renders the code unreadable,
+      partially unreadable, or intentionally difficult to interpret.
+    - This includes, but is not limited to:
+          * Symbol renaming intended to obscure meaning
+          * Control-flow flattening
+          * Encoded or encrypted source
+          * Automated obfuscation tools
+    - Exception:
+          Unusual, unconventional, or "questionable" coding style or comment style
+          does NOT count as obfuscation, provided the code remains reasonably readable
+          by a human.
+
+5. Prohibition on Monetary Sale
+The Software, whether original or modified, may not be sold for monetary value of
+any kind, including:
+    - Real-world currency
+    - Virtual currency
+    - In-game currency
+    - Tokens, credits, or any exchangeable digital asset
+Exception:
+    The Software may be included as a dependency within a paid product, provided:
+        - The Software itself is not sold independently.
+        - All required credits remain intact.
+        - This License remains included and unmodified.
+
+6. No Warranty
+The Software is provided "as is," without warranty of any kind, express or implied.
+The original creator and all contributors shall not be liable for any damages
+arising from the use of the Software.
+
+7. Acceptance of Terms
+By using, modifying, or distributing the Software, the User acknowledges and agrees
+to all terms and conditions of the PNAsystems: OSK License. Use of the Software
+constitutes full acceptance of this License.
+
+---------------------------------------------------------
+Credits:
+Original Creator: Roblox User "Goplop0959"
+Discord: asherploploto
+GitHub: Goplop0959
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PNASystems: Encryption</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="bg-gradient"></div>
+
+    <div class="app-container">
+        <header class="app-header">
+            <h1>PNASystems Encryption</h1>
+            <p>Secure, client-side encryption &amp; decryption</p>
+        </header>
+
+        <nav class="tab-nav" role="tablist">
+            <button class="tab-btn active" data-tab="encrypt-text" role="tab" aria-selected="true">Encrypt Text</button>
+            <button class="tab-btn" data-tab="decrypt-text" role="tab" aria-selected="false">Decrypt Text</button>
+            <button class="tab-btn" data-tab="encrypt-file" role="tab" aria-selected="false">Encrypt File</button>
+            <button class="tab-btn" data-tab="decrypt-file" role="tab" aria-selected="false">Decrypt File</button>
+        </nav>
+
+        <main>
+            <!-- Encrypt Text Tab -->
+            <section id="encrypt-text" class="tab-content active" role="tabpanel">
+                <div class="panel">
+                    <div class="form-group">
+                        <label for="et-plaintext">Plaintext</label>
+                        <textarea id="et-plaintext" placeholder="Enter text to encrypt..."></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="et-password">Password</label>
+                        <input type="password" id="et-password" placeholder="Enter encryption password...">
+                    </div>
+                    <div class="form-group">
+                        <label>Encryption Method</label>
+                        <select id="et-method">
+                            <option value="0">AES-256-GCM</option>
+                            <option value="1">Fernet (AES-128-CBC + HMAC)</option>
+                            <option value="3">ChaCha20-Poly1305</option>
+                            <option value="4">XChaCha20-Poly1305</option>
+                            <option value="5">TripleDES-192-CBC + HMAC</option>
+                            <option value="6">Rabbit + HMAC</option>
+                            <option value="7">Blowfish + HMAC</option>
+                        </select>
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-primary" id="et-encrypt-btn">Encrypt</button>
+                    </div>
+                    <div class="output-header" style="margin-top: 1.25rem;">
+                        <span>Encrypted Output (Base64)</span>
+                        <button class="btn-copy" id="et-copy-btn">Copy</button>
+                    </div>
+                    <div class="output-area" id="et-output"></div>
+                </div>
+            </section>
+
+            <!-- Decrypt Text Tab -->
+            <section id="decrypt-text" class="tab-content" role="tabpanel">
+                <div class="panel">
+                    <div class="form-group">
+                        <label for="dt-ciphertext">Encrypted Text (Base64)</label>
+                        <textarea id="dt-ciphertext" placeholder="Paste encrypted Base64 text..."></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="dt-password">Password</label>
+                        <input type="password" id="dt-password" placeholder="Enter decryption password...">
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-primary" id="dt-decrypt-btn">Decrypt</button>
+                    </div>
+                    <div class="output-header" style="margin-top: 1.25rem;">
+                        <span>Decrypted Output</span>
+                        <button class="btn-copy" id="dt-copy-btn">Copy</button>
+                    </div>
+                    <div class="output-area" id="dt-output"></div>
+                </div>
+            </section>
+
+            <!-- Encrypt File Tab -->
+            <section id="encrypt-file" class="tab-content" role="tabpanel">
+                <div class="panel">
+                    <div class="form-group">
+                        <label for="ef-file">Select File</label>
+                        <input type="file" id="ef-file">
+                    </div>
+                    <div class="form-group">
+                        <label for="ef-password">Password</label>
+                        <input type="password" id="ef-password" placeholder="Enter encryption password...">
+                    </div>
+                    <div class="form-group">
+                        <label>Encryption Method</label>
+                        <select id="ef-method">
+                            <option value="0">AES-256-GCM</option>
+                            <option value="1">Fernet (AES-128-CBC + HMAC)</option>
+                            <option value="3">ChaCha20-Poly1305</option>
+                            <option value="4">XChaCha20-Poly1305</option>
+                            <option value="5">TripleDES-192-CBC + HMAC</option>
+                            <option value="6">Rabbit + HMAC</option>
+                            <option value="7">Blowfish + HMAC</option>
+                        </select>
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-primary" id="ef-encrypt-btn">Encrypt &amp; Download</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Decrypt File Tab -->
+            <section id="decrypt-file" class="tab-content" role="tabpanel">
+                <div class="panel">
+                    <div class="form-group">
+                        <label for="df-file">Select Encrypted File</label>
+                        <input type="file" id="df-file">
+                    </div>
+                    <div class="form-group">
+                        <label for="df-password">Password</label>
+                        <input type="password" id="df-password" placeholder="Enter decryption password...">
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-primary" id="df-decrypt-btn">Decrypt &amp; Download</button>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="app-footer">
+            <p>PNASystems Encryption &mdash; All operations run locally in your browser. No data is ever sent to a server.</p>
+            <p>Original Creator: Roblox User <a href="https://github.com/Goplop0959" target="_blank" rel="noopener">Goplop0959</a></p>
+        </footer>
+    </div>
+
+    <div class="toast-container" id="toast-container"></div>
+
+    <!-- CryptoJS full bundle from CDN (includes AES, TripleDES, Rabbit, Blowfish, HMAC, PBKDF2, etc.) -->
+    <script src="https://cdn.jsdelivr.net/npm/crypto-js@4.2.0/crypto-js.js"></script>
+    <!-- Base85 encoding utility -->
+    <script src="base85.js"></script>
+    <!-- Fernet encryption implementation -->
+    <script src="fernet.js"></script>
+    <!-- Core crypto engine -->
+    <script src="crypto-engine.js"></script>
+    <!-- Application logic -->
+    <script src="app.js"></script>
+</body>
+</html>

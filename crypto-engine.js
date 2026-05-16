@@ -83,43 +83,36 @@ GitHub: Goplop0959
 */
 
 /**
- * Crypto Engine - Core encryption/decryption operations.
+ * Crypto Engine - Full encryption pipeline.
  *
- * Supported methods:
- *   0: AES-256-GCM (WebCrypto) - Authenticated encryption
- *   1: Fernet (CryptoJS AES-128-CBC + HMAC-SHA256) - Authenticated encryption
- *   2: Base85 (encoding layer, not standalone encryption)
- *   3: ChaCha20-Poly1305 (pure JS, IETF variant) - Authenticated encryption
- *   4: XChaCha20-Poly1305 (pure JS) - Authenticated encryption with extended nonce
- *   5: TripleDES-192-CBC + HMAC-SHA256 (CryptoJS) - Authenticated encryption
- *   6: Rabbit + HMAC-SHA256 (CryptoJS) - Authenticated encryption
- *   7: Blowfish + HMAC-SHA256 (CryptoJS) - Authenticated encryption
+ * ALL encryption methods are applied in sequence (chained pipeline).
+ * Encryption order:  AES-256-GCM → Fernet → ChaCha20-Poly1305 → XChaCha20-Poly1305
+ *                    → TripleDES-CBC+HMAC → Rabbit+HMAC → Blowfish+HMAC → Base85
+ * Decryption order:  Base85 decode → Blowfish → Rabbit → TripleDES → XChaCha20
+ *                    → ChaCha20 → Fernet → AES-256-GCM
  *
- * Key Derivation:
- *   - Uses PBKDF2-HMAC-SHA256 via WebCrypto
- *   - 16-byte random salt generated per encryption operation
- *   - 100,000 iterations for key stretching
- *   - Derives 32 bytes for encryption + 32 bytes for HMAC = 64 bytes total
+ * Each layer derives its own unique salt and keys from the password.
+ * All metadata (salts, nonces, tags) is stored in the output header.
  *
  * Binary Output Format:
- *   [PNAE][ver][methodId][salt:16][nonceLen][nonce][tag][ciphertext]
- *   - PNAE: 4-byte magic header
- *   - ver: 1-byte version (0x01)
- *   - methodId: 1-byte method identifier
- *   - salt: 16 bytes random salt
- *   - nonceLen: 1 byte indicating nonce length
- *   - nonce: variable length (method-dependent)
- *   - tag: authentication tag (16 bytes for AEAD, 32 bytes for HMAC-based)
- *   - ciphertext: encrypted data
+ *   [PNAE][ver][numLayers]
+ *   For each layer: [methodId:1][saltLen:1][salt:var][nonceLen:1][nonce:var][tagLen:2][tag:var]
+ *   [finalCiphertext]
  *
- * Text Output:
- *   The binary format above is Base64-encoded for text mode.
+ * Key Derivation:
+ *   - PBKDF2-HMAC-SHA256 via WebCrypto
+ *   - 16-byte random salt per layer
+ *   - 100,000 iterations
+ *   - Derives 32 bytes encryption key + 32 bytes HMAC key = 64 bytes
  */
 
 (function (global) {
     "use strict";
 
-    // Method identifiers
+    // ============================================================
+    // Method identifiers and metadata
+    // ============================================================
+
     var METHOD_AES256_GCM = 0;
     var METHOD_FERNET = 1;
     var METHOD_BASE85 = 2;
@@ -129,7 +122,30 @@ GitHub: Goplop0959
     var METHOD_RABBIT = 6;
     var METHOD_BLOWFISH = 7;
 
-    // Method metadata
+    // Encryption pipeline order (all methods applied sequentially)
+    var ENCRYPT_PIPELINE = [
+        METHOD_AES256_GCM,
+        METHOD_FERNET,
+        METHOD_CHACHA20_POLY1305,
+        METHOD_XCHACHA20_POLY1305,
+        METHOD_TRIPLEDES_CBC,
+        METHOD_RABBIT,
+        METHOD_BLOWFISH,
+        METHOD_BASE85
+    ];
+
+    // Decryption pipeline order (reverse of encryption)
+    var DECRYPT_PIPELINE = [
+        METHOD_BASE85,
+        METHOD_BLOWFISH,
+        METHOD_RABBIT,
+        METHOD_TRIPLEDES_CBC,
+        METHOD_XCHACHA20_POLY1305,
+        METHOD_CHACHA20_POLY1305,
+        METHOD_FERNET,
+        METHOD_AES256_GCM
+    ];
+
     var METHOD_INFO = {
         0: { name: "AES-256-GCM", nonceLen: 12, tagLen: 16, isAEAD: true },
         1: { name: "Fernet", nonceLen: 0, tagLen: 0, isAEAD: true, isFernet: true },
@@ -198,35 +214,62 @@ GitHub: Goplop0959
         return result;
     }
 
+    function log(tag, msg, data) {
+        var prefix = "[CryptoEngine:" + tag + "]";
+        if (data !== undefined) {
+            console.log(prefix, msg, data);
+        } else {
+            console.log(prefix, msg);
+        }
+    }
+
+    function logError(tag, msg, err) {
+        var prefix = "[CryptoEngine:" + tag + "]";
+        if (err instanceof Error) {
+            console.error(prefix, msg, err.message, err.stack);
+        } else {
+            console.error(prefix, msg, err);
+        }
+    }
+
     // ============================================================
     // Key Derivation (PBKDF2-HMAC-SHA256 via WebCrypto)
     // ============================================================
 
     async function deriveKeys(password, salt) {
-        var keyMaterial = await crypto.subtle.importKey(
-            "raw",
-            utf8ToUint8Array(password),
-            "PBKDF2",
-            false,
-            ["deriveBits"]
-        );
+        try {
+            log("deriveKeys", "Deriving keys with PBKDF2-HMAC-SHA256, iterations=" + PBKDF2_ITERATIONS + ", salt=" + uint8ArrayToBase64(salt).substring(0, 20) + "...");
 
-        var derivedBits = await crypto.subtle.deriveBits(
-            {
-                name: "PBKDF2",
-                salt: salt,
-                iterations: PBKDF2_ITERATIONS,
-                hash: "SHA-256"
-            },
-            keyMaterial,
-            DERIVED_KEY_LENGTH * 8
-        );
+            var keyMaterial = await crypto.subtle.importKey(
+                "raw",
+                utf8ToUint8Array(password),
+                "PBKDF2",
+                false,
+                ["deriveBits"]
+            );
 
-        var derived = new Uint8Array(derivedBits);
-        return {
-            encryptionKey: derived.slice(0, ENCRYPTION_KEY_LENGTH),
-            hmacKey: derived.slice(ENCRYPTION_KEY_LENGTH)
-        };
+            var derivedBits = await crypto.subtle.deriveBits(
+                {
+                    name: "PBKDF2",
+                    salt: salt,
+                    iterations: PBKDF2_ITERATIONS,
+                    hash: "SHA-256"
+                },
+                keyMaterial,
+                DERIVED_KEY_LENGTH * 8
+            );
+
+            var derived = new Uint8Array(derivedBits);
+            log("deriveKeys", "Key derivation successful. Derived " + derived.length + " bytes.");
+
+            return {
+                encryptionKey: derived.slice(0, ENCRYPTION_KEY_LENGTH),
+                hmacKey: derived.slice(ENCRYPTION_KEY_LENGTH)
+            };
+        } catch (err) {
+            logError("deriveKeys", "Key derivation failed", err);
+            throw err;
+        }
     }
 
     // ============================================================
@@ -234,25 +277,40 @@ GitHub: Goplop0959
     // ============================================================
 
     async function computeHMAC(key, data) {
-        var cryptoKey = await crypto.subtle.importKey(
-            "raw",
-            key,
-            { name: "HMAC", hash: "SHA-256" },
-            false,
-            ["sign"]
-        );
-        var signature = await crypto.subtle.sign("HMAC", cryptoKey, data);
-        return new Uint8Array(signature);
+        try {
+            var cryptoKey = await crypto.subtle.importKey(
+                "raw",
+                key,
+                { name: "HMAC", hash: "SHA-256" },
+                false,
+                ["sign"]
+            );
+            var signature = await crypto.subtle.sign("HMAC", cryptoKey, data);
+            return new Uint8Array(signature);
+        } catch (err) {
+            logError("computeHMAC", "HMAC computation failed", err);
+            throw err;
+        }
     }
 
     async function verifyHMAC(key, data, expectedTag) {
-        var actualTag = await computeHMAC(key, data);
-        if (actualTag.length !== expectedTag.length) return false;
-        var diff = 0;
-        for (var i = 0; i < actualTag.length; i++) {
-            diff |= actualTag[i] ^ expectedTag[i];
+        try {
+            var actualTag = await computeHMAC(key, data);
+            if (actualTag.length !== expectedTag.length) {
+                log("verifyHMAC", "HMAC length mismatch: expected " + expectedTag.length + ", got " + actualTag.length);
+                return false;
+            }
+            var diff = 0;
+            for (var i = 0; i < actualTag.length; i++) {
+                diff |= actualTag[i] ^ expectedTag[i];
+            }
+            var result = diff === 0;
+            log("verifyHMAC", "HMAC verification: " + (result ? "PASSED" : "FAILED"));
+            return result;
+        } catch (err) {
+            logError("verifyHMAC", "HMAC verification failed", err);
+            throw err;
         }
-        return diff === 0;
     }
 
     // ============================================================
@@ -260,34 +318,45 @@ GitHub: Goplop0959
     // ============================================================
 
     async function aes256GcmEncrypt(data, key, nonce) {
-        var cryptoKey = await crypto.subtle.importKey(
-            "raw", key, { name: "AES-GCM" }, false, ["encrypt"]
-        );
-        var encrypted = await crypto.subtle.encrypt(
-            { name: "AES-GCM", iv: nonce },
-            cryptoKey,
-            data
-        );
-        var result = new Uint8Array(encrypted);
-        var ciphertext = result.slice(0, result.length - 16);
-        var tag = result.slice(result.length - 16);
-        return { ciphertext: ciphertext, tag: tag };
+        try {
+            log("aes256GcmEncrypt", "Encrypting " + data.length + " bytes with AES-256-GCM");
+            var cryptoKey = await crypto.subtle.importKey(
+                "raw", key, { name: "AES-GCM" }, false, ["encrypt"]
+            );
+            var encrypted = await crypto.subtle.encrypt(
+                { name: "AES-GCM", iv: nonce },
+                cryptoKey,
+                data
+            );
+            var result = new Uint8Array(encrypted);
+            var ciphertext = result.slice(0, result.length - 16);
+            var tag = result.slice(result.length - 16);
+            log("aes256GcmEncrypt", "Encryption successful. Ciphertext: " + ciphertext.length + " bytes, Tag: " + tag.length + " bytes");
+            return { ciphertext: ciphertext, tag: tag };
+        } catch (err) {
+            logError("aes256GcmEncrypt", "AES-256-GCM encryption failed", err);
+            throw err;
+        }
     }
 
     async function aes256GcmDecrypt(data, key, nonce, tag) {
-        var cryptoKey = await crypto.subtle.importKey(
-            "raw", key, { name: "AES-GCM" }, false, ["decrypt"]
-        );
-        var combined = concatUint8Arrays(data, tag);
         try {
+            log("aes256GcmDecrypt", "Decrypting " + data.length + " bytes with AES-256-GCM");
+            var cryptoKey = await crypto.subtle.importKey(
+                "raw", key, { name: "AES-GCM" }, false, ["decrypt"]
+            );
+            var combined = concatUint8Arrays(data, tag);
             var decrypted = await crypto.subtle.decrypt(
                 { name: "AES-GCM", iv: nonce },
                 cryptoKey,
                 combined
             );
-            return new Uint8Array(decrypted);
-        } catch (e) {
-            throw new Error("Decryption failed: wrong password or corrupted data");
+            var result = new Uint8Array(decrypted);
+            log("aes256GcmDecrypt", "Decryption successful. Plaintext: " + result.length + " bytes");
+            return result;
+        } catch (err) {
+            logError("aes256GcmDecrypt", "AES-256-GCM decryption failed — wrong password or corrupted data", err);
+            throw new Error("Decryption failed at AES-256-GCM layer: wrong password or corrupted data");
         }
     }
 
@@ -295,7 +364,6 @@ GitHub: Goplop0959
     // ChaCha20-Poly1305 (Pure JS, IETF variant - RFC 8439)
     // ============================================================
 
-    // ChaCha20 quarter round
     function chacha20QuarterRound(state, a, b, c, d) {
         var mask32 = 0xFFFFFFFF;
         state[a] = (state[a] + state[b]) & mask32; state[d] ^= state[a]; state[d] = ((state[d] << 16) | (state[d] >>> 16)) & mask32;
@@ -304,39 +372,31 @@ GitHub: Goplop0959
         state[c] = (state[c] + state[d]) & mask32; state[b] ^= state[c]; state[b] = ((state[b] << 7) | (state[b] >>> 25)) & mask32;
     }
 
-    // ChaCha20 block function
     function chacha20Block(key, counter, nonce) {
         var mask32 = 0xFFFFFFFF;
-        // Constants "expand 32-byte k"
         var state = [
             0x61707865, 0x3320646e, 0x79622d32, 0x6b206574,
-            0, 0, 0, 0, 0, 0, 0, 0,  // key (8 words)
-            0, 0, 0, 0               // counter (1 word), nonce (3 words)
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0
         ];
 
-        // Load key (8 x 32-bit words, little-endian)
         for (var i = 0; i < 8; i++) {
             state[4 + i] = (key[i * 4]) | (key[i * 4 + 1] << 8) | (key[i * 4 + 2] << 16) | (key[i * 4 + 3] << 24);
         }
 
-        // Load counter
         state[12] = counter & mask32;
 
-        // Load nonce (12 bytes = 3 words, little-endian)
         state[13] = (nonce[0]) | (nonce[1] << 8) | (nonce[2] << 16) | (nonce[3] << 24);
         state[14] = (nonce[4]) | (nonce[5] << 8) | (nonce[6] << 16) | (nonce[7] << 24);
         state[15] = (nonce[8]) | (nonce[9] << 8) | (nonce[10] << 16) | (nonce[11] << 24);
 
         var workingState = state.slice();
 
-        // 20 rounds (10 double rounds)
         for (var r = 0; r < 10; r++) {
-            // Column rounds
             chacha20QuarterRound(workingState, 0, 4, 8, 12);
             chacha20QuarterRound(workingState, 1, 5, 9, 13);
             chacha20QuarterRound(workingState, 2, 6, 10, 14);
             chacha20QuarterRound(workingState, 3, 7, 11, 15);
-            // Diagonal rounds
             chacha20QuarterRound(workingState, 0, 5, 10, 15);
             chacha20QuarterRound(workingState, 1, 6, 11, 12);
             chacha20QuarterRound(workingState, 2, 7, 8, 13);
@@ -355,7 +415,6 @@ GitHub: Goplop0959
         return output;
     }
 
-    // ChaCha20 stream cipher
     function chacha20Crypt(key, nonce, data, initialCounter) {
         if (initialCounter === undefined) initialCounter = 1;
         var output = new Uint8Array(data.length);
@@ -373,9 +432,7 @@ GitHub: Goplop0959
         return output;
     }
 
-    // Poly1305 MAC (RFC 8439)
     function poly1305(key, data) {
-        // Clamp the key
         var r0 = (key[0]) | (key[1] << 8) | (key[2] << 16) | (key[3] << 24);
         var r1 = (key[4]) | (key[5] << 8) | (key[6] << 16) | (key[7] << 24);
         var r2 = (key[8]) | (key[9] << 8) | (key[10] << 16) | (key[11] << 24);
@@ -389,62 +446,22 @@ GitHub: Goplop0959
         var s2 = (key[28]) | (key[29] << 8) | (key[30] << 16) | (key[31] << 24);
         var s3 = (key[32]) | (key[33] << 8) | (key[34] << 16) | (key[35] << 24);
 
-        // Accumulator (using 5 x 64-bit limbs for 130-bit arithmetic)
         var h0 = 0, h1 = 0, h2 = 0, h3 = 0, h4 = 0;
 
-        // Process 16-byte blocks
         for (var offset = 0; offset < data.length; offset += 16) {
             var blockLen = Math.min(16, data.length - offset);
-
-            // Load block as little-endian limbs, add high bit
-            var b0, b1, b2, b3, b4;
-            if (blockLen >= 4) b0 = (data[offset]) | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24);
-            else {
-                b0 = 0;
-                for (var bi = 0; bi < blockLen && bi < 4; bi++) b0 |= data[offset + bi] << (bi * 8);
-            }
-            if (blockLen >= 8) b1 = (data[offset + 4]) | (data[offset + 5] << 8) | (data[offset + 6] << 16) | (data[offset + 7] << 24);
-            else {
-                b1 = 0;
-                for (var bi = 4; bi < blockLen && bi < 8; bi++) b1 |= data[offset + bi] << ((bi - 4) * 8);
-            }
-            if (blockLen >= 12) b2 = (data[offset + 8]) | (data[offset + 9] << 8) | (data[offset + 10] << 16) | (data[offset + 11] << 24);
-            else {
-                b2 = 0;
-                for (var bi = 8; bi < blockLen && bi < 12; bi++) b2 |= data[offset + bi] << ((bi - 8) * 8);
-            }
-            if (blockLen >= 16) b3 = (data[offset + 12]) | (data[offset + 13] << 8) | (data[offset + 14] << 16) | (data[offset + 15] << 24);
-            else {
-                b3 = 0;
-                for (var bi = 12; bi < blockLen && bi < 16; bi++) b3 |= data[offset + bi] << ((bi - 12) * 8);
-            }
-
-            b0 &= 0x3ffffff;
-            b1 = (b1 >>> 0) & 0x1ffffff;
-            b2 &= 0x3ffffff;
-            b3 = (b3 >>> 0) & 0x1ffffff;
-            b4 = blockLen === 16 ? 0 : (1 << (blockLen * 8 % 26 === 0 ? 26 : (blockLen * 8 % 26)));
-
-            // Actually, the high bit is at position blockLen * 8
-            // Let me redo this properly
-            b4 = blockLen < 16 ? (1 << (blockLen * 8)) : 0;
-
-            // Wait, I need to be more careful. In Poly1305, each 16-byte block is
-            // interpreted as a little-endian number with an extra 1 bit appended.
-            // The limbs are: 26, 27, 26, 27, 26 bits.
-            // Let me recompute:
 
             var fullBlock = new Uint8Array(17);
             for (var fi = 0; fi < blockLen; fi++) {
                 fullBlock[fi] = data[offset + fi];
             }
-            fullBlock[blockLen] = 1; // Append 1 bit (at byte position blockLen)
+            fullBlock[blockLen] = 1;
 
-            b0 = (fullBlock[0]) | (fullBlock[1] << 8) | (fullBlock[2] << 16) | (fullBlock[3] << 24);
-            b1 = (fullBlock[4]) | (fullBlock[5] << 8) | (fullBlock[6] << 16) | (fullBlock[7] << 24);
-            b2 = (fullBlock[8]) | (fullBlock[9] << 8) | (fullBlock[10] << 16) | (fullBlock[11] << 24);
-            b3 = (fullBlock[12]) | (fullBlock[13] << 8) | (fullBlock[14] << 16) | (fullBlock[15] << 24);
-            b4 = (fullBlock[16]);
+            var b0 = (fullBlock[0]) | (fullBlock[1] << 8) | (fullBlock[2] << 16) | (fullBlock[3] << 24);
+            var b1 = (fullBlock[4]) | (fullBlock[5] << 8) | (fullBlock[6] << 16) | (fullBlock[7] << 24);
+            var b2 = (fullBlock[8]) | (fullBlock[9] << 8) | (fullBlock[10] << 16) | (fullBlock[11] << 24);
+            var b3 = (fullBlock[12]) | (fullBlock[13] << 8) | (fullBlock[14] << 16) | (fullBlock[15] << 24);
+            var b4 = (fullBlock[16]);
 
             b0 &= 0x3ffffff;
             b1 = (b1 >>> 0) & 0x1ffffff;
@@ -452,14 +469,12 @@ GitHub: Goplop0959
             b3 = (b3 >>> 0) & 0x1ffffff;
             b4 &= 0x3ffffff;
 
-            // Multiply and add to accumulator
             var d0 = h0 * r0 + h1 * (4 * r4) + h2 * (4 * r3) + h3 * (4 * r2) + h4 * (4 * r1) + b0;
             var d1 = h0 * r1 + h1 * r0 + h2 * (4 * r4) + h3 * (4 * r3) + h4 * (4 * r2) + b1;
             var d2 = h0 * r2 + h1 * r1 + h2 * r0 + h3 * (4 * r4) + h4 * (4 * r3) + b2;
             var d3 = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * (4 * r4) + b3;
             var d4 = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0 + b4;
 
-            // Carry propagation
             var c;
             c = d0 >>> 26; h0 = d0 & 0x3ffffff; d1 += c;
             c = d1 >>> 27; h1 = d1 & 0x1ffffff; d2 += c;
@@ -469,8 +484,6 @@ GitHub: Goplop0959
             c = h0 >>> 26; h0 = h0 & 0x3ffffff; h1 += c;
         }
 
-        // Final reduction
-        var g0, g1, g2, g3, g4;
         var cc;
         cc = h0 >>> 26; h0 = h0 & 0x3ffffff; h1 += cc;
         cc = h1 >>> 27; h1 = h1 & 0x1ffffff; h2 += cc;
@@ -479,7 +492,7 @@ GitHub: Goplop0959
         cc = h4 >>> 26; h4 = h4 & 0x3ffffff; h0 += cc * 5;
         cc = h0 >>> 26; h0 = h0 & 0x3ffffff; h1 += cc;
 
-        // Check if h >= p and subtract if so
+        var g0, g1, g2, g3, g4;
         g0 = h0 + 5; cc = g0 >>> 26; g0 &= 0x3ffffff; g1 = h1 + cc;
         cc = g1 >>> 27; g1 &= 0x1ffffff; g2 = h2 + cc;
         cc = g2 >>> 26; g2 &= 0x3ffffff; g3 = h3 + cc;
@@ -488,13 +501,11 @@ GitHub: Goplop0959
         var borrow = (g4 < 0) ? 1 : 0;
         if (!borrow) { h0 = g0; h1 = g1; h2 = g2; h3 = g3; h4 = g4; }
 
-        // Pack into 16-byte tag
         var t0 = h0 | (h1 << 26);
         var t1 = (h1 >>> 6) | (h2 << 20);
         var t2 = (h2 >>> 12) | (h3 << 14);
         var t3 = (h3 >>> 18) | (h4 << 8);
 
-        // Add s
         t0 = (t0 + s0) >>> 0;
         t1 = (t1 + s1) >>> 0;
         t2 = (t2 + s2) >>> 0;
@@ -509,55 +520,62 @@ GitHub: Goplop0959
         return tag;
     }
 
-    // ChaCha20-Poly1305 AEAD (RFC 8439)
     function chacha20Poly1305Encrypt(key, nonce, plaintext, aad) {
-        // Generate Poly1305 key by encrypting a zero block with counter=0
-        var polyKey = chacha20Block(key, 0, nonce).slice(0, 32);
+        try {
+            log("chacha20Poly1305Encrypt", "Encrypting " + plaintext.length + " bytes");
+            var polyKey = chacha20Block(key, 0, nonce).slice(0, 32);
+            var ciphertext = chacha20Crypt(key, nonce, plaintext, 1);
 
-        // Encrypt plaintext with counter starting at 1
-        var ciphertext = chacha20Crypt(key, nonce, plaintext, 1);
+            var aadLen = aad ? aad.length : 0;
+            var aadPadded = aad ? concatUint8Arrays(aad, new Uint8Array((16 - (aadLen % 16)) % 16)) : new Uint8Array(0);
+            var ctPadded = concatUint8Arrays(ciphertext, new Uint8Array((16 - (ciphertext.length % 16)) % 16));
 
-        // Compute Poly1305 tag over AAD || padding || ciphertext || padding || lengths
-        var aadLen = aad ? aad.length : 0;
-        var aadPadded = aad ? concatUint8Arrays(aad, new Uint8Array((16 - (aadLen % 16)) % 16)) : new Uint8Array(0);
-        var ctPadded = concatUint8Arrays(ciphertext, new Uint8Array((16 - (ciphertext.length % 16)) % 16));
+            var lenBlock = new Uint8Array(16);
+            for (var i = 0; i < 8; i++) lenBlock[i] = (aadLen >>> (i * 8)) & 0xFF;
+            for (var i = 0; i < 8; i++) lenBlock[8 + i] = (ciphertext.length >>> (i * 8)) & 0xFF;
 
-        var lenBlock = new Uint8Array(16);
-        // AAD length (8 bytes, little-endian)
-        for (var i = 0; i < 8; i++) lenBlock[i] = (aadLen >>> (i * 8)) & 0xFF;
-        // Ciphertext length (8 bytes, little-endian)
-        for (var i = 0; i < 8; i++) lenBlock[8 + i] = (ciphertext.length >>> (i * 8)) & 0xFF;
+            var macData = concatUint8Arrays(aadPadded, ctPadded, lenBlock);
+            var tag = poly1305(polyKey, macData);
 
-        var macData = concatUint8Arrays(aadPadded, ctPadded, lenBlock);
-        var tag = poly1305(polyKey, macData);
-
-        return { ciphertext: ciphertext, tag: tag };
+            log("chacha20Poly1305Encrypt", "Encryption successful. Ciphertext: " + ciphertext.length + " bytes");
+            return { ciphertext: ciphertext, tag: tag };
+        } catch (err) {
+            logError("chacha20Poly1305Encrypt", "ChaCha20-Poly1305 encryption failed", err);
+            throw err;
+        }
     }
 
     function chacha20Poly1305Decrypt(key, nonce, ciphertext, tag, aad) {
-        // Generate Poly1305 key
-        var polyKey = chacha20Block(key, 0, nonce).slice(0, 32);
+        try {
+            log("chacha20Poly1305Decrypt", "Decrypting " + ciphertext.length + " bytes");
+            var polyKey = chacha20Block(key, 0, nonce).slice(0, 32);
 
-        // Verify tag
-        var aadLen = aad ? aad.length : 0;
-        var aadPadded = aad ? concatUint8Arrays(aad, new Uint8Array((16 - (aadLen % 16)) % 16)) : new Uint8Array(0);
-        var ctPadded = concatUint8Arrays(ciphertext, new Uint8Array((16 - (ciphertext.length % 16)) % 16));
+            var aadLen = aad ? aad.length : 0;
+            var aadPadded = aad ? concatUint8Arrays(aad, new Uint8Array((16 - (aadLen % 16)) % 16)) : new Uint8Array(0);
+            var ctPadded = concatUint8Arrays(ciphertext, new Uint8Array((16 - (ciphertext.length % 16)) % 16));
 
-        var lenBlock = new Uint8Array(16);
-        for (var i = 0; i < 8; i++) lenBlock[i] = (aadLen >>> (i * 8)) & 0xFF;
-        for (var i = 0; i < 8; i++) lenBlock[8 + i] = (ciphertext.length >>> (i * 8)) & 0xFF;
+            var lenBlock = new Uint8Array(16);
+            for (var i = 0; i < 8; i++) lenBlock[i] = (aadLen >>> (i * 8)) & 0xFF;
+            for (var i = 0; i < 8; i++) lenBlock[8 + i] = (ciphertext.length >>> (i * 8)) & 0xFF;
 
-        var macData = concatUint8Arrays(aadPadded, ctPadded, lenBlock);
-        var computedTag = poly1305(polyKey, macData);
+            var macData = concatUint8Arrays(aadPadded, ctPadded, lenBlock);
+            var computedTag = poly1305(polyKey, macData);
 
-        var diff = 0;
-        for (var i = 0; i < 16; i++) diff |= computedTag[i] ^ tag[i];
-        if (diff !== 0) {
-            throw new Error("Decryption failed: wrong password or corrupted data");
+            var diff = 0;
+            for (var i = 0; i < 16; i++) diff |= computedTag[i] ^ tag[i];
+            if (diff !== 0) {
+                log("chacha20Poly1305Decrypt", "Poly1305 tag verification FAILED");
+                throw new Error("Decryption failed at ChaCha20-Poly1305 layer: wrong password or corrupted data");
+            }
+            log("chacha20Poly1305Decrypt", "Poly1305 tag verification PASSED");
+
+            var result = chacha20Crypt(key, nonce, ciphertext, 1);
+            log("chacha20Poly1305Decrypt", "Decryption successful. Plaintext: " + result.length + " bytes");
+            return result;
+        } catch (err) {
+            logError("chacha20Poly1305Decrypt", "ChaCha20-Poly1305 decryption failed", err);
+            throw err;
         }
-
-        // Decrypt
-        return chacha20Crypt(key, nonce, ciphertext, 1);
     }
 
     // HChaCha20 (for XChaCha20)
@@ -609,17 +627,32 @@ GitHub: Goplop0959
         return subkey;
     }
 
-    // XChaCha20-Poly1305
     function xchacha20Poly1305Encrypt(key, nonce, plaintext, aad) {
-        var subkey = hcha20(key, nonce.slice(0, 16));
-        var shortNonce = nonce.slice(16, 24);
-        return chacha20Poly1305Encrypt(subkey, shortNonce, plaintext, aad);
+        try {
+            log("xchacha20Poly1305Encrypt", "Encrypting " + plaintext.length + " bytes with XChaCha20-Poly1305");
+            var subkey = hcha20(key, nonce.slice(0, 16));
+            var shortNonce = nonce.slice(16, 24);
+            var result = chacha20Poly1305Encrypt(subkey, shortNonce, plaintext, aad);
+            log("xchacha20Poly1305Encrypt", "XChaCha20-Poly1305 encryption successful");
+            return result;
+        } catch (err) {
+            logError("xchacha20Poly1305Encrypt", "XChaCha20-Poly1305 encryption failed", err);
+            throw err;
+        }
     }
 
     function xchacha20Poly1305Decrypt(key, nonce, ciphertext, tag, aad) {
-        var subkey = hcha20(key, nonce.slice(0, 16));
-        var shortNonce = nonce.slice(16, 24);
-        return chacha20Poly1305Decrypt(subkey, shortNonce, ciphertext, tag, aad);
+        try {
+            log("xchacha20Poly1305Decrypt", "Decrypting " + ciphertext.length + " bytes with XChaCha20-Poly1305");
+            var subkey = hcha20(key, nonce.slice(0, 16));
+            var shortNonce = nonce.slice(16, 24);
+            var result = chacha20Poly1305Decrypt(subkey, shortNonce, ciphertext, tag, aad);
+            log("xchacha20Poly1305Decrypt", "XChaCha20-Poly1305 decryption successful");
+            return result;
+        } catch (err) {
+            logError("xchacha20Poly1305Decrypt", "XChaCha20-Poly1305 decryption failed", err);
+            throw err;
+        }
     }
 
     // ============================================================
@@ -649,163 +682,224 @@ GitHub: Goplop0959
         return result;
     }
 
-    async function cbcHmacEncrypt(cipherFn, data, key, iv) {
-        // Encrypt with CBC + PKCS7
-        var dataWA = uint8ArrayToWordArray(data);
-        var keyWA = uint8ArrayToWordArray(key);
-        var ivWA = uint8ArrayToWordArray(iv);
+    async function cbcHmacEncrypt(cipherFn, cipherName, data, key, iv) {
+        try {
+            log("cbcHmacEncrypt", "Encrypting " + data.length + " bytes with " + cipherName + "-CBC + HMAC");
+            var dataWA = uint8ArrayToWordArray(data);
+            var keyWA = uint8ArrayToWordArray(key);
+            var ivWA = uint8ArrayToWordArray(iv);
 
-        var encrypted = cipherFn.encrypt(dataWA, keyWA, {
-            iv: ivWA,
-            mode: CryptoJS.mode.CBC,
-            padding: CryptoJS.pad.Pkcs7
-        });
-
-        var ciphertext = wordArrayToUint8Array(encrypted.ciphertext);
-
-        // Compute HMAC-SHA256 over IV || ciphertext
-        var hmacInput = concatUint8Arrays(iv, ciphertext);
-        var tag = await computeHMAC(key, hmacInput);
-
-        return { ciphertext: ciphertext, tag: tag };
-    }
-
-    async function cbcHmacDecrypt(cipherFn, ciphertext, key, iv, tag) {
-        // Verify HMAC
-        var hmacInput = concatUint8Arrays(iv, ciphertext);
-        var valid = await verifyHMAC(key, hmacInput, tag);
-        if (!valid) {
-            throw new Error("Decryption failed: wrong password or corrupted data");
-        }
-
-        // Decrypt
-        var ctWA = uint8ArrayToWordArray(ciphertext);
-        var keyWA = uint8ArrayToWordArray(key);
-        var ivWA = uint8ArrayToWordArray(iv);
-
-        var decrypted = cipherFn.decrypt(
-            { ciphertext: ctWA },
-            keyWA,
-            {
+            var encrypted = cipherFn.encrypt(dataWA, keyWA, {
                 iv: ivWA,
                 mode: CryptoJS.mode.CBC,
                 padding: CryptoJS.pad.Pkcs7
-            }
-        );
+            });
 
-        return wordArrayToUint8Array(decrypted);
+            var ciphertext = wordArrayToUint8Array(encrypted.ciphertext);
+
+            var hmacInput = concatUint8Arrays(iv, ciphertext);
+            var tag = await computeHMAC(key, hmacInput);
+
+            log("cbcHmacEncrypt", cipherName + " encryption successful. Ciphertext: " + ciphertext.length + " bytes");
+            return { ciphertext: ciphertext, tag: tag };
+        } catch (err) {
+            logError("cbcHmacEncrypt", cipherName + "-CBC encryption failed", err);
+            throw err;
+        }
+    }
+
+    async function cbcHmacDecrypt(cipherFn, cipherName, ciphertext, key, iv, tag) {
+        try {
+            log("cbcHmacDecrypt", "Decrypting " + ciphertext.length + " bytes with " + cipherName + "-CBC + HMAC");
+            var hmacInput = concatUint8Arrays(iv, ciphertext);
+            var valid = await verifyHMAC(key, hmacInput, tag);
+            if (!valid) {
+                log("cbcHmacDecrypt", "HMAC verification FAILED for " + cipherName);
+                throw new Error("Decryption failed at " + cipherName + " layer: wrong password or corrupted data");
+            }
+
+            var ctWA = uint8ArrayToWordArray(ciphertext);
+            var keyWA = uint8ArrayToWordArray(key);
+            var ivWA = uint8ArrayToWordArray(iv);
+
+            var decrypted = cipherFn.decrypt(
+                { ciphertext: ctWA },
+                keyWA,
+                {
+                    iv: ivWA,
+                    mode: CryptoJS.mode.CBC,
+                    padding: CryptoJS.pad.Pkcs7
+                }
+            );
+
+            var result = wordArrayToUint8Array(decrypted);
+            log("cbcHmacDecrypt", cipherName + " decryption successful. Plaintext: " + result.length + " bytes");
+            return result;
+        } catch (err) {
+            logError("cbcHmacDecrypt", cipherName + "-CBC decryption failed", err);
+            throw err;
+        }
     }
 
     // ============================================================
     // Method-specific encrypt/decrypt
     // ============================================================
 
-    async function encryptData(methodId, data, encryptionKey, hmacKey) {
+    async function encryptLayer(methodId, data, password) {
         var info = METHOD_INFO[methodId];
-        if (!info) throw new Error("Unknown method ID: " + methodId);
-
-        // Base85 is encoding-only, not encryption
-        if (info.isEncoding) {
-            throw new Error("Base85 is an encoding layer, not a standalone encryption method");
+        if (!info) {
+            logError("encryptLayer", "Unknown method ID: " + methodId, null);
+            throw new Error("Unknown method ID: " + methodId);
         }
 
-        // Fernet uses its own key derivation (32 bytes: 16 signing + 16 encryption)
+        log("encryptLayer", "=== Starting layer: " + info.name + " (ID=" + methodId + "), input size: " + data.length + " bytes ===");
+
+        var salt = randomBytes(SALT_LENGTH);
+        var keys = await deriveKeys(password, salt);
+
+        if (info.isEncoding) {
+            // Base85 encoding layer
+            log("encryptLayer", "Applying Base85 encoding");
+            var encoded = Base85.encode(data);
+            var encodedBytes = utf8ToUint8Array(encoded);
+            log("encryptLayer", "Base85 encoding complete. Output size: " + encodedBytes.length + " bytes");
+            return {
+                salt: salt,
+                nonce: new Uint8Array(0),
+                tag: new Uint8Array(0),
+                ciphertext: encodedBytes
+            };
+        }
+
         if (info.isFernet) {
-            var fernetKey = new Uint8Array(32);
-            // Derive Fernet key from our encryption key + hmac key
-            var fernetKeyInput = concatUint8Arrays(encryptionKey, hmacKey);
-            // Use HMAC to derive a deterministic 32-byte key
-            var fernetKeyWA = await computeHMAC(hmacKey, fernetKeyInput);
-            fernetKey = fernetKeyWA.slice(0, 32);
+            log("encryptLayer", "Applying Fernet encryption");
+            var fernetKeyInput = concatUint8Arrays(keys.encryptionKey, keys.hmacKey);
+            var fernetKeyWA = await computeHMAC(keys.hmacKey, fernetKeyInput);
+            var fernetKey = fernetKeyWA.slice(0, 32);
 
             var token = Fernet.encrypt(data, fernetKey);
             var tokenBytes = base64ToUint8Array(token);
+            log("encryptLayer", "Fernet encryption complete. Token size: " + tokenBytes.length + " bytes");
             return {
-                ciphertext: tokenBytes,
+                salt: salt,
+                nonce: new Uint8Array(0),
                 tag: new Uint8Array(0),
-                nonce: new Uint8Array(0)
+                ciphertext: tokenBytes
             };
         }
 
         var nonce = randomBytes(info.nonceLen);
 
         if (methodId === METHOD_AES256_GCM) {
-            var result = await aes256GcmEncrypt(data, encryptionKey, nonce);
-            return { ciphertext: result.ciphertext, tag: result.tag, nonce: nonce };
+            var result = await aes256GcmEncrypt(data, keys.encryptionKey, nonce);
+            log("encryptLayer", "AES-256-GCM layer complete. Output: " + result.ciphertext.length + " bytes");
+            return { salt: salt, nonce: nonce, tag: result.tag, ciphertext: result.ciphertext };
         }
 
         if (methodId === METHOD_CHACHA20_POLY1305) {
-            var result = chacha20Poly1305Encrypt(encryptionKey, nonce, data, null);
-            return { ciphertext: result.ciphertext, tag: result.tag, nonce: nonce };
+            var result = chacha20Poly1305Encrypt(keys.encryptionKey, nonce, data, null);
+            log("encryptLayer", "ChaCha20-Poly1305 layer complete. Output: " + result.ciphertext.length + " bytes");
+            return { salt: salt, nonce: nonce, tag: result.tag, ciphertext: result.ciphertext };
         }
 
         if (methodId === METHOD_XCHACHA20_POLY1305) {
-            var result = xchacha20Poly1305Encrypt(encryptionKey, nonce, data, null);
-            return { ciphertext: result.ciphertext, tag: result.tag, nonce: nonce };
+            var result = xchacha20Poly1305Encrypt(keys.encryptionKey, nonce, data, null);
+            log("encryptLayer", "XChaCha20-Poly1305 layer complete. Output: " + result.ciphertext.length + " bytes");
+            return { salt: salt, nonce: nonce, tag: result.tag, ciphertext: result.ciphertext };
         }
 
-        // CBC + HMAC methods
         if (methodId === METHOD_TRIPLEDES_CBC) {
-            var result = await cbcHmacEncrypt(CryptoJS.TripleDES, data, encryptionKey, nonce);
-            return { ciphertext: result.ciphertext, tag: result.tag, nonce: nonce };
+            var result = await cbcHmacEncrypt(CryptoJS.TripleDES, "TripleDES", data, keys.encryptionKey, nonce);
+            log("encryptLayer", "TripleDES-CBC layer complete. Output: " + result.ciphertext.length + " bytes");
+            return { salt: salt, nonce: nonce, tag: result.tag, ciphertext: result.ciphertext };
         }
 
         if (methodId === METHOD_RABBIT) {
-            var result = await cbcHmacEncrypt(CryptoJS.Rabbit, data, encryptionKey, nonce);
-            return { ciphertext: result.ciphertext, tag: result.tag, nonce: nonce };
+            var result = await cbcHmacEncrypt(CryptoJS.Rabbit, "Rabbit", data, keys.encryptionKey, nonce);
+            log("encryptLayer", "Rabbit layer complete. Output: " + result.ciphertext.length + " bytes");
+            return { salt: salt, nonce: nonce, tag: result.tag, ciphertext: result.ciphertext };
         }
 
         if (methodId === METHOD_BLOWFISH) {
-            var result = await cbcHmacEncrypt(CryptoJS.Blowfish, data, encryptionKey, nonce);
-            return { ciphertext: result.ciphertext, tag: result.tag, nonce: nonce };
+            var result = await cbcHmacEncrypt(CryptoJS.Blowfish, "Blowfish", data, keys.encryptionKey, nonce);
+            log("encryptLayer", "Blowfish layer complete. Output: " + result.ciphertext.length + " bytes");
+            return { salt: salt, nonce: nonce, tag: result.tag, ciphertext: result.ciphertext };
         }
 
         throw new Error("Unsupported method: " + info.name);
     }
 
-    async function decryptData(methodId, ciphertext, tag, nonce, encryptionKey, hmacKey) {
+    async function decryptLayer(methodId, ciphertext, salt, nonce, tag, password) {
         var info = METHOD_INFO[methodId];
-        if (!info) throw new Error("Unknown method ID: " + methodId);
+        if (!info) {
+            logError("decryptLayer", "Unknown method ID: " + methodId, null);
+            throw new Error("Unknown method ID: " + methodId);
+        }
+
+        log("decryptLayer", "=== Starting layer: " + info.name + " (ID=" + methodId + "), input size: " + ciphertext.length + " bytes ===");
+
+        var keys = await deriveKeys(password, salt);
 
         if (info.isEncoding) {
-            throw new Error("Base85 is an encoding layer, not a standalone encryption method");
+            // Base85 decoding layer
+            log("decryptLayer", "Applying Base85 decoding");
+            var encodedStr = uint8ArrayToUtf8(ciphertext);
+            var decoded = Base85.decode(encodedStr);
+            log("decryptLayer", "Base85 decoding complete. Output size: " + decoded.length + " bytes");
+            return decoded;
         }
 
         if (info.isFernet) {
+            log("decryptLayer", "Applying Fernet decryption");
             var token = uint8ArrayToBase64(ciphertext);
-            var fernetKeyInput = concatUint8Arrays(encryptionKey, hmacKey);
-            var fernetKeyWA = await computeHMAC(hmacKey, fernetKeyInput);
+            var fernetKeyInput = concatUint8Arrays(keys.encryptionKey, keys.hmacKey);
+            var fernetKeyWA = await computeHMAC(keys.hmacKey, fernetKeyInput);
             var fernetKey = fernetKeyWA.slice(0, 32);
 
             try {
-                return Fernet.decrypt(token, fernetKey);
+                var result = Fernet.decrypt(token, fernetKey);
+                log("decryptLayer", "Fernet decryption complete. Output: " + result.length + " bytes");
+                return result;
             } catch (e) {
-                throw new Error("Decryption failed: wrong password or corrupted data");
+                logError("decryptLayer", "Fernet decryption failed", e);
+                throw new Error("Decryption failed at Fernet layer: wrong password or corrupted data");
             }
         }
 
         if (methodId === METHOD_AES256_GCM) {
-            return await aes256GcmDecrypt(ciphertext, encryptionKey, nonce, tag);
+            var result = await aes256GcmDecrypt(ciphertext, keys.encryptionKey, nonce, tag);
+            log("decryptLayer", "AES-256-GCM layer complete. Output: " + result.length + " bytes");
+            return result;
         }
 
         if (methodId === METHOD_CHACHA20_POLY1305) {
-            return chacha20Poly1305Decrypt(encryptionKey, nonce, ciphertext, tag, null);
+            var result = chacha20Poly1305Decrypt(keys.encryptionKey, nonce, ciphertext, tag, null);
+            log("decryptLayer", "ChaCha20-Poly1305 layer complete. Output: " + result.length + " bytes");
+            return result;
         }
 
         if (methodId === METHOD_XCHACHA20_POLY1305) {
-            return xchacha20Poly1305Decrypt(encryptionKey, nonce, ciphertext, tag, null);
+            var result = xchacha20Poly1305Decrypt(keys.encryptionKey, nonce, ciphertext, tag, null);
+            log("decryptLayer", "XChaCha20-Poly1305 layer complete. Output: " + result.length + " bytes");
+            return result;
         }
 
         if (methodId === METHOD_TRIPLEDES_CBC) {
-            return await cbcHmacDecrypt(CryptoJS.TripleDES, ciphertext, encryptionKey, nonce, tag);
+            var result = await cbcHmacDecrypt(CryptoJS.TripleDES, "TripleDES", ciphertext, keys.encryptionKey, nonce, tag);
+            log("decryptLayer", "TripleDES-CBC layer complete. Output: " + result.length + " bytes");
+            return result;
         }
 
         if (methodId === METHOD_RABBIT) {
-            return await cbcHmacDecrypt(CryptoJS.Rabbit, ciphertext, encryptionKey, nonce, tag);
+            var result = await cbcHmacDecrypt(CryptoJS.Rabbit, "Rabbit", ciphertext, keys.encryptionKey, nonce, tag);
+            log("decryptLayer", "Rabbit layer complete. Output: " + result.length + " bytes");
+            return result;
         }
 
         if (methodId === METHOD_BLOWFISH) {
-            return await cbcHmacDecrypt(CryptoJS.Blowfish, ciphertext, encryptionKey, nonce, tag);
+            var result = await cbcHmacDecrypt(CryptoJS.Blowfish, "Blowfish", ciphertext, keys.encryptionKey, nonce, tag);
+            log("decryptLayer", "Blowfish layer complete. Output: " + result.length + " bytes");
+            return result;
         }
 
         throw new Error("Unsupported method: " + info.name);
@@ -815,142 +909,240 @@ GitHub: Goplop0959
     // Binary serialization
     // ============================================================
 
-    function serialize(methodId, salt, nonce, tag, ciphertext) {
-        var parts = [
-            new Uint8Array(MAGIC),
-            new Uint8Array([VERSION]),
-            new Uint8Array([methodId]),
-            salt,
-            new Uint8Array([nonce.length]),
-            nonce,
-            tag,
-            ciphertext
-        ];
-        return concatUint8Arrays.apply(null, parts);
+    function serialize(layers, finalCiphertext) {
+        // Calculate total size
+        var headerSize = 4 + 1 + 1; // magic + version + numLayers
+        for (var i = 0; i < layers.length; i++) {
+            var layer = layers[i];
+            headerSize += 1 + 1 + layer.salt.length + 1 + layer.nonce.length + 2 + layer.tag.length;
+        }
+
+        var result = new Uint8Array(headerSize + finalCiphertext.length);
+        var offset = 0;
+
+        // Magic
+        result[offset++] = MAGIC[0];
+        result[offset++] = MAGIC[1];
+        result[offset++] = MAGIC[2];
+        result[offset++] = MAGIC[3];
+
+        // Version
+        result[offset++] = VERSION;
+
+        // Number of layers
+        result[offset++] = layers.length;
+
+        // Layer metadata
+        for (var i = 0; i < layers.length; i++) {
+            var layer = layers[i];
+
+            // Method ID (1 byte)
+            result[offset++] = layer.methodId;
+
+            // Salt length (1 byte) + salt
+            result[offset++] = layer.salt.length;
+            result.set(layer.salt, offset);
+            offset += layer.salt.length;
+
+            // Nonce length (1 byte) + nonce
+            result[offset++] = layer.nonce.length;
+            result.set(layer.nonce, offset);
+            offset += layer.nonce.length;
+
+            // Tag length (2 bytes, big-endian) + tag
+            result[offset++] = (layer.tag.length >>> 8) & 0xFF;
+            result[offset++] = layer.tag.length & 0xFF;
+            result.set(layer.tag, offset);
+            offset += layer.tag.length;
+        }
+
+        // Final ciphertext
+        result.set(finalCiphertext, offset);
+
+        log("serialize", "Serialized " + layers.length + " layers. Total output: " + result.length + " bytes");
+        return result;
     }
 
     function deserialize(data) {
-        if (data.length < 24) {
+        log("deserialize", "Deserializing " + data.length + " bytes");
+
+        if (data.length < 7) {
+            logError("deserialize", "Data too short: " + data.length + " bytes (minimum 7)", null);
             throw new Error("Invalid encrypted data: too short");
         }
 
         // Check magic
         for (var i = 0; i < 4; i++) {
             if (data[i] !== MAGIC[i]) {
-                throw new Error("Invalid encrypted data: wrong magic header");
+                logError("deserialize", "Magic mismatch at byte " + i + ": expected " + MAGIC[i] + ", got " + data[i], null);
+                throw new Error("Invalid encrypted data: wrong magic header (not a PNASystems encrypted file)");
             }
         }
 
         var offset = 4;
         var version = data[offset++];
+        log("deserialize", "Version: " + version);
         if (version !== VERSION) {
-            throw new Error("Unsupported version: " + version);
+            logError("deserialize", "Unsupported version: " + version + " (expected " + VERSION + ")", null);
+            throw new Error("Unsupported encrypted data version: " + version);
         }
 
-        var methodId = data[offset++];
-        var info = METHOD_INFO[methodId];
-        if (!info) {
-            throw new Error("Unknown method ID: " + methodId);
+        var numLayers = data[offset++];
+        log("deserialize", "Number of layers: " + numLayers);
+
+        var layers = [];
+        for (var i = 0; i < numLayers; i++) {
+            var methodId = data[offset++];
+            var info = METHOD_INFO[methodId];
+            if (!info) {
+                logError("deserialize", "Unknown method ID " + methodId + " in layer " + i, null);
+                throw new Error("Unknown encryption method ID: " + methodId + " in layer " + (i + 1));
+            }
+
+            var saltLen = data[offset++];
+            var salt = data.slice(offset, offset + saltLen);
+            offset += saltLen;
+
+            var nonceLen = data[offset++];
+            var nonce = data.slice(offset, offset + nonceLen);
+            offset += nonceLen;
+
+            var tagLen = (data[offset] << 8) | data[offset + 1];
+            offset += 2;
+            var tag = data.slice(offset, offset + tagLen);
+            offset += tagLen;
+
+            layers.push({
+                methodId: methodId,
+                methodName: info.name,
+                salt: salt,
+                nonce: nonce,
+                tag: tag
+            });
+
+            log("deserialize", "Layer " + (i + 1) + ": " + info.name + ", salt=" + saltLen + "B, nonce=" + nonceLen + "B, tag=" + tagLen + "B");
         }
-
-        var salt = data.slice(offset, offset + SALT_LENGTH);
-        offset += SALT_LENGTH;
-
-        var nonceLen = data[offset++];
-        var nonce = data.slice(offset, offset + nonceLen);
-        offset += nonceLen;
-
-        var tagLen = info.tagLen;
-        var tag = data.slice(offset, offset + tagLen);
-        offset += tagLen;
 
         var ciphertext = data.slice(offset);
+        log("deserialize", "Ciphertext size: " + ciphertext.length + " bytes");
 
-        return { methodId: methodId, salt: salt, nonce: nonce, tag: tag, ciphertext: ciphertext };
+        return { layers: layers, ciphertext: ciphertext };
     }
 
     // ============================================================
-    // High-level API
+    // High-level Pipeline API
     // ============================================================
 
-    /**
-     * Encrypt text with the given method and password.
-     * Returns Base64-encoded binary output.
-     */
-    async function encryptText(methodId, plaintext, password) {
-        var data = utf8ToUint8Array(plaintext);
-        return encryptBytes(methodId, data, password);
-    }
+    async function encryptBytes(data, password) {
+        log("encryptBytes", "========== STARTING ENCRYPTION PIPELINE ==========");
+        log("encryptBytes", "Input data size: " + data.length + " bytes");
+        log("encryptBytes", "Pipeline order: " + ENCRYPT_PIPELINE.map(function(id) { return METHOD_INFO[id].name; }).join(" → "));
 
-    /**
-     * Decrypt text from Base64-encoded binary output.
-     * Returns UTF-8 plaintext string.
-     */
-    async function decryptText(b64, password) {
-        var decrypted = await decryptBytes(b64, password);
-        return uint8ArrayToUtf8(decrypted);
-    }
+        var currentData = data;
+        var layerMetadata = [];
 
-    /**
-     * Encrypt file bytes with the given method and password.
-     * Returns raw encrypted bytes (for download).
-     */
-    async function encryptBytes(methodId, data, password) {
-        var salt = randomBytes(SALT_LENGTH);
-        var keys = await deriveKeys(password, salt);
-        var result = await encryptData(methodId, data, keys.encryptionKey, keys.hmacKey);
-        var serialized = serialize(methodId, salt, result.nonce, result.tag, result.ciphertext);
-        return serialized;
-    }
-
-    /**
-     * Decrypt file bytes from Base64-encoded binary output.
-     * Returns raw decrypted bytes.
-     */
-    async function decryptBytes(b64, password) {
-        var data = base64ToUint8Array(b64);
-        var parsed = deserialize(data);
-        var keys = await deriveKeys(password, parsed.salt);
-        return decryptData(parsed.methodId, parsed.ciphertext, parsed.tag, parsed.nonce, keys.encryptionKey, keys.hmacKey);
-    }
-
-    /**
-     * Get method info by ID.
-     */
-    function getMethodInfo(methodId) {
-        return METHOD_INFO[methodId];
-    }
-
-    /**
-     * Get all available methods.
-     */
-    function getMethods() {
-        var methods = [];
-        for (var id in METHOD_INFO) {
-            var info = METHOD_INFO[id];
-            if (!info.isEncoding) {
-                methods.push({ id: parseInt(id), name: info.name });
+        for (var i = 0; i < ENCRYPT_PIPELINE.length; i++) {
+            var methodId = ENCRYPT_PIPELINE[i];
+            try {
+                var result = await encryptLayer(methodId, currentData, password);
+                layerMetadata.push({
+                    methodId: methodId,
+                    salt: result.salt,
+                    nonce: result.nonce,
+                    tag: result.tag
+                });
+                currentData = result.ciphertext;
+                log("encryptBytes", "Layer " + (i + 1) + "/" + ENCRYPT_PIPELINE.length + " (" + METHOD_INFO[methodId].name + ") complete. Output: " + currentData.length + " bytes");
+            } catch (err) {
+                logError("encryptBytes", "Pipeline failed at layer " + (i + 1) + " (" + METHOD_INFO[methodId].name + ")", err);
+                throw new Error("Encryption failed at " + METHOD_INFO[methodId].name + " layer: " + err.message);
             }
         }
-        return methods;
+
+        var output = serialize(layerMetadata, currentData);
+        log("encryptBytes", "========== ENCRYPTION PIPELINE COMPLETE ==========");
+        log("encryptBytes", "Final output size: " + output.length + " bytes");
+        return output;
     }
 
-    // Export
+    async function decryptBytes(data, password) {
+        log("decryptBytes", "========== STARTING DECRYPTION PIPELINE ==========");
+        log("decryptBytes", "Input data size: " + data.length + " bytes");
+
+        var parsed;
+        try {
+            parsed = deserialize(data);
+        } catch (err) {
+            logError("decryptBytes", "Failed to parse encrypted data header", err);
+            throw err;
+        }
+
+        log("decryptBytes", "Parsed " + parsed.layers.length + " layers from header");
+        log("decryptBytes", "Decryption pipeline order: " + DECRYPT_PIPELINE.map(function(id) { return METHOD_INFO[id].name; }).join(" → "));
+
+        var currentData = parsed.ciphertext;
+
+        for (var i = 0; i < DECRYPT_PIPELINE.length; i++) {
+            var methodId = DECRYPT_PIPELINE[i];
+            var layerInfo = parsed.layers[i];
+
+            if (!layerInfo) {
+                logError("decryptBytes", "Missing layer metadata for step " + (i + 1), null);
+                throw new Error("Corrupted data: missing layer metadata for decryption step " + (i + 1));
+            }
+
+            if (layerInfo.methodId !== methodId) {
+                logError("decryptBytes", "Method mismatch at step " + (i + 1) + ": expected " + METHOD_INFO[methodId].name + ", got " + METHOD_INFO[layerInfo.methodId].name, null);
+                throw new Error("Corrupted data: expected " + METHOD_INFO[methodId].name + " but found " + METHOD_INFO[layerInfo.methodId].name);
+            }
+
+            try {
+                currentData = await decryptLayer(methodId, currentData, layerInfo.salt, layerInfo.nonce, layerInfo.tag, password);
+                log("decryptBytes", "Layer " + (i + 1) + "/" + DECRYPT_PIPELINE.length + " (" + METHOD_INFO[methodId].name + ") complete. Output: " + currentData.length + " bytes");
+            } catch (err) {
+                logError("decryptBytes", "Pipeline failed at layer " + (i + 1) + " (" + METHOD_INFO[methodId].name + ")", err);
+                throw err;
+            }
+        }
+
+        log("decryptBytes", "========== DECRYPTION PIPELINE COMPLETE ==========");
+        log("decryptBytes", "Final plaintext size: " + currentData.length + " bytes");
+        return currentData;
+    }
+
+    async function encryptText(plaintext, password) {
+        log("encryptText", "Encrypting text (" + plaintext.length + " characters)");
+        var data = utf8ToUint8Array(plaintext);
+        var encrypted = await encryptBytes(data, password);
+        var b64 = uint8ArrayToBase64(encrypted);
+        log("encryptText", "Encrypted text output: " + b64.length + " Base64 characters");
+        return b64;
+    }
+
+    async function decryptText(b64, password) {
+        log("decryptText", "Decrypting text from " + b64.length + " Base64 characters");
+        var data = base64ToUint8Array(b64);
+        var decrypted = await decryptBytes(data, password);
+        var plaintext = uint8ArrayToUtf8(decrypted);
+        log("decryptText", "Decrypted text: " + plaintext.length + " characters");
+        return plaintext;
+    }
+
+    // ============================================================
+    // Public API
+    // ============================================================
+
     global.CryptoEngine = {
-        METHOD_AES256_GCM: METHOD_AES256_GCM,
-        METHOD_FERNET: METHOD_FERNET,
-        METHOD_BASE85: METHOD_BASE85,
-        METHOD_CHACHA20_POLY1305: METHOD_CHACHA20_POLY1305,
-        METHOD_XCHACHA20_POLY1305: METHOD_XCHACHA20_POLY1305,
-        METHOD_TRIPLEDES_CBC: METHOD_TRIPLEDES_CBC,
-        METHOD_RABBIT: METHOD_RABBIT,
-        METHOD_BLOWFISH: METHOD_BLOWFISH,
+        ENCRYPT_PIPELINE: ENCRYPT_PIPELINE,
+        DECRYPT_PIPELINE: DECRYPT_PIPELINE,
+        METHOD_INFO: METHOD_INFO,
         encryptText: encryptText,
         decryptText: decryptText,
         encryptBytes: encryptBytes,
-        decryptBytes: decryptBytes,
-        getMethodInfo: getMethodInfo,
-        getMethods: getMethods
+        decryptBytes: decryptBytes
     };
+
+    log("init", "CryptoEngine initialized with " + ENCRYPT_PIPELINE.length + " pipeline layers");
+    log("init", "Pipeline: " + ENCRYPT_PIPELINE.map(function(id) { return METHOD_INFO[id].name; }).join(" → "));
 
 })(typeof window !== "undefined" ? window : typeof global !== "undefined" ? global : this);

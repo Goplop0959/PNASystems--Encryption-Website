@@ -118,16 +118,8 @@ GitHub: Goplop0959
                         <input type="password" id="et-password" placeholder="Enter encryption password...">
                     </div>
                     <div class="form-group">
-                        <label>Encryption Method</label>
-                        <select id="et-method">
-                            <option value="0">AES-256-GCM</option>
-                            <option value="1">Fernet (AES-128-CBC + HMAC)</option>
-                            <option value="3">ChaCha20-Poly1305</option>
-                            <option value="4">XChaCha20-Poly1305</option>
-                            <option value="5">TripleDES-192-CBC + HMAC</option>
-                            <option value="6">Rabbit + HMAC</option>
-                            <option value="7">Blowfish + HMAC</option>
-                        </select>
+                        <label>Encryption Pipeline (all methods applied in sequence)</label>
+                        <div class="pipeline-info">AES-256-GCM → Fernet → ChaCha20-Poly1305 → XChaCha20-Poly1305 → TripleDES-CBC → Rabbit → Blowfish → Base85</div>
                     </div>
                     <div class="btn-group">
                         <button class="btn btn-primary" id="et-encrypt-btn">Encrypt</button>
@@ -174,16 +166,8 @@ GitHub: Goplop0959
                         <input type="password" id="ef-password" placeholder="Enter encryption password...">
                     </div>
                     <div class="form-group">
-                        <label>Encryption Method</label>
-                        <select id="ef-method">
-                            <option value="0">AES-256-GCM</option>
-                            <option value="1">Fernet (AES-128-CBC + HMAC)</option>
-                            <option value="3">ChaCha20-Poly1305</option>
-                            <option value="4">XChaCha20-Poly1305</option>
-                            <option value="5">TripleDES-192-CBC + HMAC</option>
-                            <option value="6">Rabbit + HMAC</option>
-                            <option value="7">Blowfish + HMAC</option>
-                        </select>
+                        <label>Encryption Pipeline (all methods applied in sequence)</label>
+                        <div class="pipeline-info">AES-256-GCM → Fernet → ChaCha20-Poly1305 → XChaCha20-Poly1305 → TripleDES-CBC → Rabbit → Blowfish → Base85</div>
                     </div>
                     <div class="btn-group">
                         <button class="btn btn-primary" id="ef-encrypt-btn">Encrypt &amp; Download</button>

@@ -685,6 +685,7 @@ GitHub: Goplop0959
     async function cbcHmacEncrypt(cipherFn, cipherName, data, key, iv) {
         try {
             log("cbcHmacEncrypt", "Encrypting " + data.length + " bytes with " + cipherName + "-CBC + HMAC");
+            log("cbcHmacEncrypt", "Key len=" + key.length + ", IV len=" + iv.length);
             var dataWA = uint8ArrayToWordArray(data);
             var keyWA = uint8ArrayToWordArray(key);
             var ivWA = uint8ArrayToWordArray(iv);
@@ -696,9 +697,11 @@ GitHub: Goplop0959
             });
 
             var ciphertext = wordArrayToUint8Array(encrypted.ciphertext);
+            log("cbcHmacEncrypt", cipherName + " raw ciphertext: " + ciphertext.length + " bytes");
 
             var hmacInput = concatUint8Arrays(iv, ciphertext);
             var tag = await computeHMAC(key, hmacInput);
+            log("cbcHmacEncrypt", "HMAC tag: " + uint8ArrayToBase64(tag).substring(0, 20) + "...");
 
             log("cbcHmacEncrypt", cipherName + " encryption successful. Ciphertext: " + ciphertext.length + " bytes");
             return { ciphertext: ciphertext, tag: tag };
@@ -711,10 +714,15 @@ GitHub: Goplop0959
     async function cbcHmacDecrypt(cipherFn, cipherName, ciphertext, key, iv, tag) {
         try {
             log("cbcHmacDecrypt", "Decrypting " + ciphertext.length + " bytes with " + cipherName + "-CBC + HMAC");
+            log("cbcHmacDecrypt", "HMAC input: iv=" + iv.length + " bytes, ciphertext=" + ciphertext.length + " bytes");
+            log("cbcHmacDecrypt", "Expected tag: " + uint8ArrayToBase64(tag).substring(0, 20) + "...");
             var hmacInput = concatUint8Arrays(iv, ciphertext);
             var valid = await verifyHMAC(key, hmacInput, tag);
             if (!valid) {
                 log("cbcHmacDecrypt", "HMAC verification FAILED for " + cipherName);
+                log("cbcHmacDecrypt", "HMAC key (first 8 bytes): " + uint8ArrayToBase64(key.slice(0, 8)));
+                log("cbcHmacDecrypt", "IV: " + uint8ArrayToBase64(iv));
+                log("cbcHmacDecrypt", "Ciphertext (first 16 bytes): " + uint8ArrayToBase64(ciphertext.slice(0, 16)));
                 throw new Error("Decryption failed at " + cipherName + " layer: wrong password or corrupted data");
             }
 
@@ -815,10 +823,10 @@ GitHub: Goplop0959
 
         if (info.isEncoding) {
             // Base85 encoding layer
-            log("encryptLayer", "Applying Base85 encoding");
+            log("encryptLayer", "Applying Base85 encoding to " + data.length + " bytes");
             var encoded = Base85.encode(data);
             var encodedBytes = utf8ToUint8Array(encoded);
-            log("encryptLayer", "Base85 encoding complete. Output size: " + encodedBytes.length + " bytes");
+            log("encryptLayer", "Base85 encoding complete. Encoded string len=" + encoded.length + ", bytes=" + encodedBytes.length);
             return {
                 salt: salt,
                 nonce: new Uint8Array(0),
@@ -882,7 +890,9 @@ GitHub: Goplop0959
         }
 
         if (methodId === METHOD_BLOWFISH) {
+            log("encryptLayer", "Blowfish encrypt: key len=" + keys.encryptionKey.length + ", nonce len=" + nonce.length + ", data len=" + data.length);
             var result = await cbcHmacEncrypt(CryptoJS.Blowfish, "Blowfish", data, keys.encryptionKey, nonce);
+            log("encryptLayer", "Blowfish encrypted: ct len=" + result.ciphertext.length + ", tag len=" + result.tag.length);
             log("encryptLayer", "Blowfish layer complete. Output: " + result.ciphertext.length + " bytes");
             return { salt: salt, nonce: nonce, tag: result.tag, ciphertext: result.ciphertext };
         }
@@ -903,8 +913,9 @@ GitHub: Goplop0959
 
         if (info.isEncoding) {
             // Base85 decoding layer
-            log("decryptLayer", "Applying Base85 decoding");
+            log("decryptLayer", "Applying Base85 decoding to " + ciphertext.length + " bytes");
             var encodedStr = uint8ArrayToUtf8(ciphertext);
+            log("decryptLayer", "Base85 encoded string: " + encodedStr.substring(0, 50) + "...");
             var decoded = Base85.decode(encodedStr);
             log("decryptLayer", "Base85 decoding complete. Output size: " + decoded.length + " bytes");
             return decoded;
@@ -963,7 +974,9 @@ GitHub: Goplop0959
         }
 
         if (methodId === METHOD_BLOWFISH) {
+            log("decryptLayer", "Blowfish decrypt: key len=" + keys.encryptionKey.length + ", nonce len=" + nonce.length + ", ct len=" + ciphertext.length + ", tag len=" + tag.length);
             var result = await cbcHmacDecrypt(CryptoJS.Blowfish, "Blowfish", ciphertext, keys.encryptionKey, nonce, tag);
+            log("decryptLayer", "Blowfish decrypted: pt len=" + result.length);
             log("decryptLayer", "Blowfish layer complete. Output: " + result.length + " bytes");
             return result;
         }
@@ -1196,6 +1209,60 @@ GitHub: Goplop0959
         var plaintext = uint8ArrayToUtf8(decrypted);
         log("decryptText", "Decrypted text: " + plaintext.length + " characters");
         return plaintext;
+    }
+
+    // ============================================================
+    // Self-test on initialization
+    // ============================================================
+
+    async function runSelfTest() {
+        log("selfTest", "Running Blowfish self-test...");
+        try {
+            var testKey = randomBytes(32);
+            var testIV = randomBytes(8);
+            var testData = utf8ToUint8Array("Hello, Blowfish test!");
+
+            var keyWA = uint8ArrayToWordArray(testKey);
+            var ivWA = uint8ArrayToWordArray(testIV);
+            var dataWA = uint8ArrayToWordArray(testData);
+
+            var encrypted = CryptoJS.Blowfish.encrypt(dataWA, keyWA, {
+                iv: ivWA,
+                mode: CryptoJS.mode.CBC,
+                padding: CryptoJS.pad.Pkcs7
+            });
+
+            var ctWA = encrypted.ciphertext;
+            var ciphertext = wordArrayToUint8Array(ctWA);
+
+            var decrypted = CryptoJS.Blowfish.decrypt(
+                { ciphertext: ctWA },
+                keyWA,
+                {
+                    iv: ivWA,
+                    mode: CryptoJS.mode.CBC,
+                    padding: CryptoJS.pad.Pkcs7
+                }
+            );
+
+            var plaintext = wordArrayToUint8Array(decrypted);
+            var plaintextStr = uint8ArrayToUtf8(plaintext);
+
+            if (plaintextStr === "Hello, Blowfish test!") {
+                log("selfTest", "Blowfish self-test PASSED");
+            } else {
+                log("selfTest", "Blowfish self-test FAILED: expected 'Hello, Blowfish test!', got '" + plaintextStr + "'");
+            }
+        } catch (err) {
+            logError("selfTest", "Blowfish self-test threw an error", err);
+        }
+    }
+
+    // Run self-test asynchronously (don't block initialization)
+    if (typeof CryptoJS !== "undefined" && CryptoJS.Blowfish) {
+        runSelfTest();
+    } else {
+        logError("selfTest", "CryptoJS.Blowfish is not available", null);
     }
 
     // ============================================================

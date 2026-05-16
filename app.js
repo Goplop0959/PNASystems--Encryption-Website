@@ -371,6 +371,20 @@ GitHub: Goplop0959
     }
 
     // ============================================================
+    // Safe Uint8Array to Base64 (chunked to avoid stack overflow)
+    // ============================================================
+
+    function uint8ArrayToBase64Safe(data) {
+        var CHUNK_SIZE = 0x8000; // 32KB chunks
+        var binary = '';
+        for (var i = 0; i < data.length; i += CHUNK_SIZE) {
+            var chunk = data.subarray(i, i + CHUNK_SIZE);
+            binary += String.fromCharCode.apply(null, chunk);
+        }
+        return btoa(binary);
+    }
+
+    // ============================================================
     // Encrypt Text Handler
     // ============================================================
 
@@ -520,7 +534,7 @@ GitHub: Goplop0959
         try {
             appLog("decryptFile", "Reading encrypted file data...");
             var fileData = await readFileAsArrayBuffer(file);
-            var b64 = btoa(String.fromCharCode.apply(null, fileData));
+            var b64 = uint8ArrayToBase64Safe(fileData);
             appLog("decryptFile", "File converted to Base64: " + b64.length + " chars");
 
             appLog("decryptFile", "Calling CryptoEngine.decryptBytes...");

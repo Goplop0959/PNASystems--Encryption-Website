@@ -152,8 +152,8 @@ GitHub: Goplop0959
         2: { name: "Base85", nonceLen: 0, tagLen: 0, isAEAD: false, isEncoding: true },
         3: { name: "ChaCha20-Poly1305", nonceLen: 12, tagLen: 16, isAEAD: true },
         4: { name: "XChaCha20-Poly1305", nonceLen: 24, tagLen: 16, isAEAD: true },
-        5: { name: "TripleDES-192-CBC", nonceLen: 8, tagLen: 32, isAEAD: false },
-        6: { name: "Rabbit", nonceLen: 8, tagLen: 32, isAEAD: false },
+        5: { name: "TripleDES-192-CBC", nonceLen: 8, tagLen: 32, isAEAD: false, keyLen: 24 },
+        6: { name: "Rabbit", nonceLen: 8, tagLen: 32, isAEAD: false, isStream: true, keyLen: 16 },
         7: { name: "Blowfish", nonceLen: 8, tagLen: 32, isAEAD: false }
     };
 
@@ -741,6 +741,62 @@ GitHub: Goplop0959
         }
     }
 
+    // Stream cipher + HMAC (for Rabbit, which is a stream cipher and doesn't use CBC/padding)
+    async function streamHmacEncrypt(cipherFn, cipherName, data, key, iv) {
+        try {
+            log("streamHmacEncrypt", "Encrypting " + data.length + " bytes with " + cipherName + " (stream) + HMAC");
+            var dataWA = uint8ArrayToWordArray(data);
+            var keyWA = uint8ArrayToWordArray(key);
+            var ivWA = uint8ArrayToWordArray(iv);
+
+            var encrypted = cipherFn.encrypt(dataWA, keyWA, {
+                iv: ivWA
+            });
+
+            var ciphertext = wordArrayToUint8Array(encrypted.ciphertext);
+
+            var hmacInput = concatUint8Arrays(iv, ciphertext);
+            var tag = await computeHMAC(key, hmacInput);
+
+            log("streamHmacEncrypt", cipherName + " encryption successful. Ciphertext: " + ciphertext.length + " bytes");
+            return { ciphertext: ciphertext, tag: tag };
+        } catch (err) {
+            logError("streamHmacEncrypt", cipherName + " encryption failed", err);
+            throw err;
+        }
+    }
+
+    async function streamHmacDecrypt(cipherFn, cipherName, ciphertext, key, iv, tag) {
+        try {
+            log("streamHmacDecrypt", "Decrypting " + ciphertext.length + " bytes with " + cipherName + " (stream) + HMAC");
+            var hmacInput = concatUint8Arrays(iv, ciphertext);
+            var valid = await verifyHMAC(key, hmacInput, tag);
+            if (!valid) {
+                log("streamHmacDecrypt", "HMAC verification FAILED for " + cipherName);
+                throw new Error("Decryption failed at " + cipherName + " layer: wrong password or corrupted data");
+            }
+
+            var ctWA = uint8ArrayToWordArray(ciphertext);
+            var keyWA = uint8ArrayToWordArray(key);
+            var ivWA = uint8ArrayToWordArray(iv);
+
+            var decrypted = cipherFn.decrypt(
+                { ciphertext: ctWA },
+                keyWA,
+                {
+                    iv: ivWA
+                }
+            );
+
+            var result = wordArrayToUint8Array(decrypted);
+            log("streamHmacDecrypt", cipherName + " decryption successful. Plaintext: " + result.length + " bytes");
+            return result;
+        } catch (err) {
+            logError("streamHmacDecrypt", cipherName + " decryption failed", err);
+            throw err;
+        }
+    }
+
     // ============================================================
     // Method-specific encrypt/decrypt
     // ============================================================
@@ -773,6 +829,9 @@ GitHub: Goplop0959
 
         if (info.isFernet) {
             log("encryptLayer", "Applying Fernet encryption");
+            if (typeof Fernet === "undefined") {
+                throw new Error("Fernet module is not loaded. fernet.js may be missing.");
+            }
             var fernetKeyInput = concatUint8Arrays(keys.encryptionKey, keys.hmacKey);
             var fernetKeyWA = await computeHMAC(keys.hmacKey, fernetKeyInput);
             var fernetKey = fernetKeyWA.slice(0, 32);
@@ -809,13 +868,15 @@ GitHub: Goplop0959
         }
 
         if (methodId === METHOD_TRIPLEDES_CBC) {
-            var result = await cbcHmacEncrypt(CryptoJS.TripleDES, "TripleDES", data, keys.encryptionKey, nonce);
+            var tdesKey = keys.encryptionKey.slice(0, 24);
+            var result = await cbcHmacEncrypt(CryptoJS.TripleDES, "TripleDES", data, tdesKey, nonce);
             log("encryptLayer", "TripleDES-CBC layer complete. Output: " + result.ciphertext.length + " bytes");
             return { salt: salt, nonce: nonce, tag: result.tag, ciphertext: result.ciphertext };
         }
 
         if (methodId === METHOD_RABBIT) {
-            var result = await cbcHmacEncrypt(CryptoJS.Rabbit, "Rabbit", data, keys.encryptionKey, nonce);
+            var rabbitKey = keys.encryptionKey.slice(0, 16);
+            var result = await streamHmacEncrypt(CryptoJS.Rabbit, "Rabbit", data, rabbitKey, nonce);
             log("encryptLayer", "Rabbit layer complete. Output: " + result.ciphertext.length + " bytes");
             return { salt: salt, nonce: nonce, tag: result.tag, ciphertext: result.ciphertext };
         }
@@ -851,6 +912,9 @@ GitHub: Goplop0959
 
         if (info.isFernet) {
             log("decryptLayer", "Applying Fernet decryption");
+            if (typeof Fernet === "undefined") {
+                throw new Error("Fernet module is not loaded. fernet.js may be missing.");
+            }
             var token = uint8ArrayToBase64(ciphertext);
             var fernetKeyInput = concatUint8Arrays(keys.encryptionKey, keys.hmacKey);
             var fernetKeyWA = await computeHMAC(keys.hmacKey, fernetKeyInput);
@@ -885,13 +949,15 @@ GitHub: Goplop0959
         }
 
         if (methodId === METHOD_TRIPLEDES_CBC) {
-            var result = await cbcHmacDecrypt(CryptoJS.TripleDES, "TripleDES", ciphertext, keys.encryptionKey, nonce, tag);
+            var tdesKey = keys.encryptionKey.slice(0, 24);
+            var result = await cbcHmacDecrypt(CryptoJS.TripleDES, "TripleDES", ciphertext, tdesKey, nonce, tag);
             log("decryptLayer", "TripleDES-CBC layer complete. Output: " + result.length + " bytes");
             return result;
         }
 
         if (methodId === METHOD_RABBIT) {
-            var result = await cbcHmacDecrypt(CryptoJS.Rabbit, "Rabbit", ciphertext, keys.encryptionKey, nonce, tag);
+            var rabbitKey = keys.encryptionKey.slice(0, 16);
+            var result = await streamHmacDecrypt(CryptoJS.Rabbit, "Rabbit", ciphertext, rabbitKey, nonce, tag);
             log("decryptLayer", "Rabbit layer complete. Output: " + result.length + " bytes");
             return result;
         }

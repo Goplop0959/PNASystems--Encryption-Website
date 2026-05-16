@@ -95,9 +95,10 @@ GitHub: Goplop0959
 (function (global) {
     "use strict";
 
-    // Ascii85 alphabet: 85 characters starting from ASCII 33 ('!')
-    // Index 0 = '!' (33), Index 84 = '~' (117), with 'z' at index 51 as special shorthand
-    var ASCII85_CHARSET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&()*+-;<=>?@[]^_`{|}~";
+    // Standard ASCII85 charset: 85 consecutive characters from '!' (ASCII 33) to 'u' (ASCII 117)
+    // This is the Adobe/PostScript/PDF standard Ascii85 alphabet.
+    // 'z' (index 51) is special shorthand for 4 zero bytes.
+    var ASCII85_CHARSET = "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstu";
 
     /**
      * Encode a Uint8Array to Ascii85 string.

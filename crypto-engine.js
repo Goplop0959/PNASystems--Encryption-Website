@@ -1080,6 +1080,10 @@ GitHub: Goplop0959
         log("decryptBytes", "Parsed " + parsed.layers.length + " layers from header");
         log("decryptBytes", "Decryption pipeline order: " + DECRYPT_PIPELINE.map(function(id) { return METHOD_INFO[id].name; }).join(" → "));
 
+        // Reverse layers array so it matches decryption order (last encrypted = first decrypted)
+        parsed.layers.reverse();
+        log("decryptBytes", "Reversed layers for decryption. First layer to decrypt: " + parsed.layers[0].methodName);
+
         var currentData = parsed.ciphertext;
 
         for (var i = 0; i < DECRYPT_PIPELINE.length; i++) {

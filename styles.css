@@ -402,6 +402,63 @@ select option {
     word-break: break-all;
 }
 
+/* License tab content */
+.license-content {
+    max-height: 70vh;
+    overflow-y: auto;
+    padding-right: 0.5rem;
+}
+
+.license-content h2 {
+    font-size: 1.4rem;
+    color: #e0e0e0;
+    margin-bottom: 0.5rem;
+    margin-top: 1.5rem;
+}
+
+.license-content h2:first-child {
+    margin-top: 0;
+}
+
+.license-content h3 {
+    font-size: 1.1rem;
+    color: #c0c0d0;
+    margin-top: 1.25rem;
+    margin-bottom: 0.5rem;
+}
+
+.license-content p {
+    color: #a0a0b0;
+    margin-bottom: 0.75rem;
+    line-height: 1.7;
+}
+
+.license-content ul, .license-content ol {
+    color: #a0a0b0;
+    margin-bottom: 0.75rem;
+    padding-left: 1.5rem;
+}
+
+.license-content li {
+    margin-bottom: 0.4rem;
+    line-height: 1.6;
+}
+
+.license-content hr {
+    border: none;
+    border-top: 1px solid rgba(100, 100, 150, 0.3);
+    margin: 1.5rem 0;
+}
+
+.license-content a {
+    color: #FF1493;
+    text-decoration: none;
+}
+
+.license-content a:hover {
+    text-decoration: underline;
+}
+
 /* ============================================================
    Method Checklist
    ============================================================ */
